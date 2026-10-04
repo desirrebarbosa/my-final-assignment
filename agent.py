@@ -47,6 +47,10 @@ MIN_TOTAL_SCORE = 3.0
 MIN_COVERAGE = 0.5
 HIGH_TOTAL_SCORE = 9.0
 EXTRACTIVE_CONFIDENCE = 0.6
+BORDERLINE_PASSAGES = 5
+MIN_ANSWER_TERMS = 4
+MIN_ANSWER_SUPPORT = 0.5
+BORDERLINE_CONFIDENCE = 0.7
 
 _STARTS = r"(?:^|(?<=[.!?\n]))\s*"
 INSTRUCTION_SHAPES = re.compile(
@@ -212,9 +216,12 @@ class YourAgent:
             raise ProviderFailure(f"{type(error).__name__}: {error}")
         return str(outcome.get("reply", ""))
 
-    def _ask(self, question: str, evidence: Evidence, trace: list[TraceEvent]) -> ResearchAnswer:
+    def _ask(
+        self, question: str, evidence: Evidence, trace: list[TraceEvent], passages: int = 3
+    ) -> ResearchAnswer:
         context = "\n\n".join(
-            f"<passage>[{p.chunk.doc_id}]\n{p.chunk.text}</passage>" for p in evidence.passages[:3]
+            f"<passage>[{p.chunk.doc_id}]\n{p.chunk.text}</passage>"
+            for p in evidence.passages[:passages]
         )
         user = f"Context:\n{context}\n\nQuestion: {question}"
         raw = self._complete(SYSTEM_PROMPT, user)
@@ -241,23 +248,14 @@ class YourAgent:
         if attacked:
             trace.append(TraceEvent("decision", f"an order was set aside; the topic is {topic!r}"))
         evidence = self._gather(topic)
-        if evidence is None or not evidence.strong:
-            found = (
-                []
-                if evidence is None
-                else [
-                    (p.chunk.doc_id, p.chunk.position, round(p.score, 2))
-                    for p in evidence.passages[:3]
-                ]
-            )
-            trace.append(TraceEvent("retrieve", f"top_k={TOP_K} -> {found}"))
+        if evidence is None:
+            trace.append(TraceEvent("retrieve", f"top_k={TOP_K} -> []"))
             trace.append(
-                TraceEvent(
-                    "decision",
-                    "no document covers the question's terms; refusing without an LLM call",
-                )
+                TraceEvent("decision", "no relevant passage; refusing without an LLM call")
             )
             return AgentResult(answer=_refusal(), trace=tuple(trace))
+        if not evidence.strong:
+            return self._borderline(topic, evidence, trace)
 
         found = [(p.chunk.doc_id, p.chunk.position, round(p.score, 2)) for p in evidence.passages]
         trace.append(
@@ -292,7 +290,7 @@ class YourAgent:
             )
 
         try:
-            drafted = self._ask(question, evidence, trace)
+            drafted = self._ask(topic, evidence, trace)
         except ProviderFailure as error:
             trace.append(TraceEvent("decision", f"provider failed ({error}); flagged refusal"))
             return AgentResult(
@@ -355,6 +353,69 @@ class YourAgent:
                 needs_human_review=False,
             )
         return AgentResult(answer=answer, trace=tuple(trace))
+
+    def _grounded(
+        self, text: str, cited: tuple[str, ...], topic: str, shown: set[str], injected: set[str]
+    ) -> list[str]:
+        words = _terms(text)
+        if len(words) < MIN_ANSWER_TERMS:
+            return []
+        return [
+            doc_id
+            for doc_id in cited
+            if doc_id in shown
+            and doc_id not in injected
+            and len(words & self._vocabulary[doc_id]) / len(words) >= MIN_ANSWER_SUPPORT
+            and _terms(topic) & self._vocabulary[doc_id]
+        ]
+
+    def _borderline(self, topic: str, evidence: Evidence, trace: list[TraceEvent]) -> AgentResult:
+        found = [(p.chunk.doc_id, p.chunk.position, round(p.score, 2)) for p in evidence.passages]
+        trace.append(TraceEvent("retrieve", f"top_k={TOP_K} -> {found}; evidence is borderline"))
+        try:
+            drafted = self._ask(topic, evidence, trace, passages=BORDERLINE_PASSAGES)
+        except (ProviderFailure, AnswerParseError) as error:
+            trace.append(
+                TraceEvent("decision", f"borderline and no usable reply ({error}); refusing")
+            )
+            return AgentResult(answer=_refusal(), trace=tuple(trace))
+
+        shown = {p.chunk.doc_id for p in evidence.passages[:BORDERLINE_PASSAGES]}
+        injected = {
+            p.chunk.doc_id
+            for p in evidence.passages[:BORDERLINE_PASSAGES]
+            if INSTRUCTION_SHAPES.search(p.chunk.text)
+        }
+        cited = _as_ids(drafted.citations)
+        text = drafted.answer.strip()
+        grounded = self._grounded(text, cited, topic, shown, injected)
+        if (
+            drafted.needs_human_review
+            or not text
+            or not grounded
+            or any(c not in shown for c in cited)
+        ):
+            trace.append(
+                TraceEvent(
+                    "decision",
+                    f"borderline: the model cited {list(cited)} and its answer is not grounded "
+                    "in one of them; refusing",
+                )
+            )
+            return AgentResult(answer=_refusal(), trace=tuple(trace))
+
+        doc_id = grounded[0]
+        source = next(doc for doc in self.documents if doc.doc_id == doc_id)
+        trace.append(TraceEvent("decision", f"borderline, answered and grounded in ['{doc_id}']"))
+        return AgentResult(
+            answer=ResearchAnswer(
+                answer=f"{text}\n\nFrom {doc_id}: {_clean(source.text)}",
+                citations=(doc_id,),
+                confidence=min(drafted.confidence, BORDERLINE_CONFIDENCE),
+                needs_human_review=False,
+            ),
+            trace=tuple(trace),
+        )
 
     def __call__(self, question: str) -> ResearchAnswer:
         return self.run(question).answer
