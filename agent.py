@@ -63,13 +63,23 @@ INSTRUCTION_SHAPES = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+LEAK_SHAPES = re.compile(
+    r"\b(?:reveal|print|dump|leak|expose|output|repeat|show|tell|give|send|share|display)\b"
+    r"(?:\s+[\w.]+){0,4}?\s+(?:your|the|my)\s+(?:contents\s+of\s+(?:your|the)\s+)?"
+    r"(?:system\s+prompt|hidden\s+instructions|secret(?:\s+value)?s?|api\s+keys?|keys?"
+    r"|tokens?|passwords?|credentials?|authorization\s+headers?|\.env|env\s+file)",
+    re.IGNORECASE,
+)
 ATTACK_SHAPES = re.compile(
     r"\b(?:ignore|disregard|forget|pretend|override|bypass|jailbreak|unrestricted"
-    r"|no\s+restrictions|i\s+order\s+you|you\s+must|skip\s+(?:the\s+)?review|act\s+as)\b"
+    r"|no\s+(?:restrictions|rules)|i\s+order\s+you|you\s+must|skip\s+(?:the\s+|all\s+)?\w*\s*"
+    r"(?:review|checks?)|act\s+as|developer\s+mode|obey|you\s+are\s+dan"
+    r"|without\s+(?:needing\s+)?(?:any\s+)?(?:human\s+)?review|full\s+confidence"
+    r"|drop\s+the\s+citations|from\s+now\s+on)\b"
     r"|^\s*(?:system|assistant|developer)\s*$",
     re.IGNORECASE,
 )
-_CLAUSES = re.compile(r"[.:;!?]+|\band\b", re.IGNORECASE)
+_CLAUSES = re.compile(r"[.:;!?,]+(?=\s|$)|\band\b|\bthen\b", re.IGNORECASE)
 FILLER_WORDS = frozenset(
     {"just", "simply", "tell", "explain", "list", "please", "describe", "give", "show"}
 )
@@ -119,10 +129,16 @@ def _terms(text: str) -> set[str]:
     return {_stem(token) for token in _tokens(text) if len(token) > 2 and token not in FILLER_WORDS}
 
 
-def _topic(question: str) -> str:
+def _is_attack(clause: str) -> bool:
+    return bool(ATTACK_SHAPES.search(clause) or LEAK_SHAPES.search(clause))
+
+
+def _topic(question: str) -> str | None:
     clauses = [c for c in _CLAUSES.split(question) if c and c.strip()]
-    kept = [c for c in clauses if not ATTACK_SHAPES.search(c)]
-    if not kept or len(kept) == len(clauses) or not _terms(" ".join(kept)):
+    kept = [c for c in clauses if not _is_attack(c)]
+    if not kept or not _terms(" ".join(kept)):
+        return None if LEAK_SHAPES.search(question) else question
+    if len(kept) == len(clauses):
         return question
     return " ".join(c.strip() for c in kept)
 
@@ -154,8 +170,7 @@ class YourAgent:
     def _vocabulary(self) -> dict[str, set[str]]:
         return {doc.doc_id: _terms(f"{doc.title} {doc.text}") for doc in self.documents}
 
-    def _gather(self, question: str) -> Evidence | None:
-        topic = _topic(question)
+    def _gather(self, topic: str) -> Evidence | None:
         passages = tuple(retrieve(topic, self.documents, top_k=TOP_K))
         if not passages:
             return None
@@ -218,7 +233,14 @@ class YourAgent:
     def run(self, question: str) -> AgentResult:
         """One question, answered or refused, with the trace of how."""
         trace: list[TraceEvent] = []
-        evidence = self._gather(question)
+        topic = _topic(question)
+        if topic is None:
+            trace.append(TraceEvent("decision", "the question only asks for a secret; refusing"))
+            return AgentResult(answer=_refusal(), trace=tuple(trace))
+        attacked = topic != question
+        if attacked:
+            trace.append(TraceEvent("decision", f"an order was set aside; the topic is {topic!r}"))
+        evidence = self._gather(topic)
         if evidence is None or not evidence.strong:
             found = (
                 []
@@ -250,6 +272,24 @@ class YourAgent:
         )
         if injected:
             trace.append(TraceEvent("decision", f"instruction-shaped text in {injected}"))
+
+        if attacked and not injected:
+            trace.append(
+                TraceEvent(
+                    "decision",
+                    f"answering from {evidence.cited_doc} without a model call, "
+                    "so the order in the question never reaches a model",
+                )
+            )
+            return AgentResult(
+                answer=ResearchAnswer(
+                    answer=f"From {evidence.cited_doc}: {evidence.excerpt}",
+                    citations=(evidence.cited_doc,),
+                    confidence=EXTRACTIVE_CONFIDENCE,
+                    needs_human_review=False,
+                ),
+                trace=tuple(trace),
+            )
 
         try:
             drafted = self._ask(question, evidence, trace)
