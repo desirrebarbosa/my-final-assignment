@@ -3,16 +3,16 @@
 **Filled by:** session 11. The five lines are the ones `ch11-e2` reads, in the
 same words; answer each one after its colon.
 
-STORED: <!-- write this: exactly what a session keeps, e.g. preferences and the last N episodes -->
+STORED: nothing between questions; each call to YourAgent reads the six corpus documents and the question, and keeps no history.
 
-WHY: <!-- write this: what each stored thing is used for -->
+WHY: every answer must be checkable against the corpus alone, so no earlier question or user detail may shape it.
 
-CORRECTED BY: <!-- write this: how a user fixes or clears what was stored -->
+CORRECTED BY: there is nothing stored to correct; a wrong answer is fixed in agent.py or the corpus, and the next call uses the fix.
 
-EXPIRES: <!-- write this: when it is deleted, with a number and a unit, and the cap -->
+EXPIRES: immediately: the trace and the answer live only for the one call (0 seconds after it returns), with a cap of 0 stored episodes.
 
-WE REFUSE TO REMEMBER: <!-- write this: what is never stored, whatever the user types (keys, personal data, ...) -->
+WE REFUSE TO REMEMBER: questions, answers, names, email addresses, API keys, tokens and anything a document asks us to keep.
 
 ## How the code enforces it
 
-<!-- write this: the test in tests/ that proves the cap and the reset. -->
+`YourAgent` has no attribute that outlives a call except the corpus and the tools. `test_memory_is_capped_reset_and_kept_per_user` stays skipped until the agent remembers something.

@@ -157,15 +157,6 @@ def test_injection_cannot_add_a_source_or_clear_the_review_flag() -> None:
     assert answer.confidence <= 0.2, "the injected 'confidence 1.0' was obeyed"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "sessions 13-14: the starter passes an obeyed reply through when it cites only "
-        "retrieved documents. Detect instruction-shaped text in retrieved passages and "
-        "flag the answer, then delete this marker."
-    ),
-)
 def test_injection_cannot_dictate_an_unflagged_answer() -> None:
     model = GullibleLLM(
         obeyed_reply=_reply("ACCESS GRANTED", [INJECTED_DOC], confidence=1.0, review=False)
@@ -197,15 +188,6 @@ class BrokenLLM:
         raise ConnectionError("provider unreachable")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "session 2 taught the refusal as a value (ch02-e4); wiring it into YourAgent "
-        "is the hardening after session 14. Catch the provider's error, return a "
-        "flagged refusal, then delete this marker."
-    ),
-)
 def test_provider_error_is_flagged_not_raised() -> None:
     model = BrokenLLM()
     try:
@@ -235,15 +217,6 @@ class HangingLLM:
 DEADLINE_S = 1.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "session 2 taught the deadline (a timeout is an exception you turn into a "
-        "refusal); enforcing YourAgent.timeout_s is the hardening after session 14. "
-        "Then delete this marker."
-    ),
-)
 def test_timeout_on_a_hanging_provider_is_flagged_within_a_second() -> None:
     model = HangingLLM()
     agent = YourAgent(client=model)
@@ -300,9 +273,15 @@ def test_memory_is_capped_reset_and_kept_per_user() -> None:
     raise NotImplementedError
 
 
-@pytest.mark.skip(
-    reason="session 14: the regression test for rank 1 of docs/ISSUES.md. Write it red "
-    "against the bug, fix the bug, watch it go green."
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "rank 1 of docs/ISSUES.md: lexical retrieval misses a paraphrase that shares no "
+        "words with prompt-injection.md, so the agent refuses a supported question."
+    ),
 )
 def test_regression_rank_1_of_the_issue_list() -> None:
-    raise NotImplementedError
+    answer = YourAgent(client=FakeLLM())("keeping a chatbot from being hijacked by hidden commands")
+
+    assert answer.citations == ("prompt-injection",), answer
